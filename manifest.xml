@@ -15,7 +15,7 @@
   <DisplayName DefaultValue="Email to Markdown" />
   <Description DefaultValue="Exports the open email's headers and formatted body to a Markdown file." />
   <IconUrl DefaultValue="https://togren.github.io/outlook-md-exporter/assets/icon-32.png" />
-  <HighResIconUrl DefaultValue="https://togren.github.io/outlook-md-exporter/assets/icon-80.png" />
+  <HighResolutionIconUrl DefaultValue="https://Togren.github.io/outlook-md-exporter/assets/icon-80.png" />
   <SupportUrl DefaultValue="https://togren.github.io/outlook-md-exporter/" />
 
   <AppDomains>
