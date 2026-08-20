@@ -1,0 +1,184 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Email to Markdown</title>
+  <script src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/turndown@7.2.0/dist/turndown.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/turndown-plugin-gfm@1.0.2/dist/turndown-plugin-gfm.js"></script>
+  <style>
+    body {
+      font-family: -apple-system, "Segoe UI", Arial, sans-serif;
+      margin: 0;
+      padding: 16px;
+      color: #1b1b1b;
+      background: #faf9f8;
+    }
+    h1 {
+      font-size: 15px;
+      margin: 0 0 4px 0;
+    }
+    p.sub {
+      font-size: 12px;
+      color: #666;
+      margin: 0 0 16px 0;
+    }
+    label {
+      display: block;
+      font-size: 12px;
+      margin: 10px 0 4px 0;
+    }
+    select {
+      width: 100%;
+      padding: 4px;
+      font-size: 13px;
+    }
+    button#export-btn {
+      margin-top: 18px;
+      width: 100%;
+      padding: 10px 12px;
+      font-size: 14px;
+      font-weight: 600;
+      color: white;
+      background: #2b579a;
+      border: none;
+      border-radius: 3px;
+      cursor: pointer;
+    }
+    button#export-btn:hover { background: #1e3f73; }
+    button#export-btn:disabled { background: #a3a3a3; cursor: default; }
+    #status {
+      margin-top: 12px;
+      font-size: 12px;
+      min-height: 16px;
+    }
+    #status.error { color: #b3261e; }
+    #status.ok { color: #146c2e; }
+  </style>
+</head>
+<body>
+  <h1>Export to Markdown</h1>
+  <p class="sub">Converts the open email's headers and formatted body (tables, lists, bold, italic, underline) to a .md file.</p>
+
+  <label for="underline-mode">Underline handling</label>
+  <select id="underline-mode">
+    <option value="html">Keep as inline HTML &lt;u&gt;text&lt;/u&gt; (renders in GitHub/Obsidian/VS Code)</option>
+    <option value="bold">Convert to bold as a substitute</option>
+    <option value="drop">Drop underline formatting</option>
+  </select>
+
+  <button id="export-btn">Export this email to Markdown</button>
+  <div id="status"></div>
+
+  <script>
+    Office.onReady(() => {
+      document.getElementById("export-btn").onclick = exportEmail;
+    });
+
+    function setStatus(msg, cls) {
+      const el = document.getElementById("status");
+      el.textContent = msg;
+      el.className = cls || "";
+    }
+
+    function sanitizeFilename(name) {
+      return (name || "untitled")
+        .replace(/[\\/:*?"<>|]/g, "-")
+        .replace(/\s+/g, " ")
+        .trim()
+        .slice(0, 120);
+    }
+
+    function formatRecipients(list) {
+      if (!list || list.length === 0) return "";
+      return list.map(r => (r.displayName ? `${r.displayName} <${r.emailAddress}>` : r.emailAddress)).join(", ");
+    }
+
+    function yamlEscape(str) {
+      if (!str) return '""';
+      return '"' + String(str).replace(/"/g, '\\"') + '"';
+    }
+
+    function buildFrontmatter(item) {
+      const to = formatRecipients(item.to);
+      const cc = formatRecipients(item.cc);
+      const from = item.from ? (item.from.displayName ? `${item.from.displayName} <${item.from.emailAddress}>` : item.from.emailAddress) : "";
+      const date = item.dateTimeCreated ? item.dateTimeCreated.toISOString() : "";
+
+      let fm = "---\n";
+      fm += `subject: ${yamlEscape(item.subject)}\n`;
+      fm += `from: ${yamlEscape(from)}\n`;
+      fm += `to: ${yamlEscape(to)}\n`;
+      if (cc) fm += `cc: ${yamlEscape(cc)}\n`;
+      fm += `date: ${yamlEscape(date)}\n`;
+      fm += "---\n\n";
+      return fm;
+    }
+
+    function convertHtmlToMarkdown(html, underlineMode) {
+      const turndownService = new TurndownService({
+        headingStyle: "atx",
+        codeBlockStyle: "fenced",
+        bulletListMarker: "-"
+      });
+      turndownService.use(turndownPluginGfm.gfm); // tables, strikethrough, task lists
+
+      turndownService.addRule("underline", {
+        filter: ["u"],
+        replacement: function (content) {
+          if (underlineMode === "drop") return content;
+          if (underlineMode === "bold") return "**" + content + "**";
+          return "<u>" + content + "</u>";
+        }
+      });
+
+      return turndownService.turndown(html);
+    }
+
+    function downloadFile(filename, content) {
+      const blob = new Blob([content], { type: "text/markdown;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    }
+
+    function exportEmail() {
+      const btn = document.getElementById("export-btn");
+      const underlineMode = document.getElementById("underline-mode").value;
+      btn.disabled = true;
+      setStatus("Reading email body…");
+
+      const item = Office.context.mailbox.item;
+
+      item.body.getAsync(Office.CoercionType.Html, {}, function (result) {
+        btn.disabled = false;
+        if (result.status !== Office.AsyncResultStatus.Succeeded) {
+          setStatus("Failed to read email body: " + result.error.message, "error");
+          return;
+        }
+
+        try {
+          const frontmatter = buildFrontmatter(item);
+          const markdownBody = convertHtmlToMarkdown(result.value, underlineMode);
+          const fullMarkdown = frontmatter + markdownBody + "\n";
+
+          const dateStr = item.dateTimeCreated
+            ? item.dateTimeCreated.toISOString().slice(0, 10)
+            : "0000-00-00";
+          const filename = `${dateStr} ${sanitizeFilename(item.subject)}.md`;
+
+          downloadFile(filename, fullMarkdown);
+          setStatus("Exported: " + filename, "ok");
+        } catch (e) {
+          setStatus("Conversion error: " + e.message, "error");
+        }
+      });
+    }
+  </script>
+</body>
+</html>
