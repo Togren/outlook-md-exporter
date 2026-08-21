@@ -115,6 +115,62 @@
       return fm;
     }
 
+    // Outlook/Word wraps every visual line in its own <p class="x_MsoNormal">
+    // (zero margin, so consecutive lines sit tight). A real blank line is a
+    // genuinely empty <p> inserted between them, not extra CSS spacing.
+    // Turndown can't see that convention, so without this preprocessing every
+    // <p> boundary becomes a full Markdown paragraph break, inflating tight
+    // lines into blank-line-separated paragraphs. This merges tight runs of
+    // <p> into one paragraph (joined by <br>, which Turndown converts to a
+    // proper hard line break) and drops the empty spacer paragraphs, whose
+    // job of creating separation is preserved simply by the remaining
+    // paragraphs staying distinct.
+    function mergeTightParagraphs(html) {
+      const doc = new DOMParser().parseFromString(html, "text/html");
+
+      function isEmptyParagraph(el) {
+        if (!el || el.tagName !== "P") return false;
+        const text = el.textContent.replace(/\u00A0/g, "").trim();
+        return text.length === 0;
+      }
+
+      function processElement(parent) {
+        // Recurse into non-P children first (paragraphs can live inside
+        // wrapping divs, table cells, etc.) - harmless no-op where it doesn't apply.
+        Array.from(parent.children).forEach(child => {
+          if (child.tagName !== "P") processElement(child);
+        });
+
+        const children = Array.from(parent.children);
+        let i = 0;
+        while (i < children.length) {
+          const el = children[i];
+          if (el.tagName === "P" && !isEmptyParagraph(el)) {
+            let j = i + 1;
+            const run = [el];
+            while (j < children.length && children[j].tagName === "P" && !isEmptyParagraph(children[j])) {
+              run.push(children[j]);
+              j++;
+            }
+            for (let k = 1; k < run.length; k++) {
+              run[0].appendChild(doc.createElement("br"));
+              while (run[k].firstChild) {
+                run[0].appendChild(run[k].firstChild);
+              }
+              run[k].remove();
+            }
+            i = j;
+          } else {
+            if (isEmptyParagraph(el)) el.remove();
+            i++;
+          }
+        }
+      }
+
+      processElement(doc.body);
+      return doc.body.innerHTML;
+    }
+
     function convertHtmlToMarkdown(html, underlineMode) {
       const turndownService = new TurndownService({
         headingStyle: "atx",
@@ -164,7 +220,8 @@
 
         try {
           const frontmatter = buildFrontmatter(item);
-          const markdownBody = convertHtmlToMarkdown(result.value, underlineMode);
+          const preprocessedHtml = mergeTightParagraphs(result.value);
+          const markdownBody = convertHtmlToMarkdown(preprocessedHtml, underlineMode);
           const fullMarkdown = frontmatter + markdownBody + "\n";
 
           const dateStr = item.dateTimeCreated
