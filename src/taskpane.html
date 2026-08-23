@@ -68,11 +68,13 @@
   </select>
 
   <button id="export-btn">Export this email to Markdown</button>
+  <button id="debug-btn" style="margin-top:6px;width:100%;padding:6px 12px;font-size:12px;background:#eee;border:1px solid #ccc;border-radius:3px;cursor:pointer;">Download raw HTML (debug)</button>
   <div id="status"></div>
 
   <script>
     Office.onReady(() => {
       document.getElementById("export-btn").onclick = exportEmail;
+      document.getElementById("debug-btn").onclick = downloadRawHtml;
     });
 
     function setStatus(msg, cls) {
@@ -179,6 +181,33 @@
       });
       turndownService.use(turndownPluginGfm.gfm); // tables, strikethrough, task lists
 
+      // Word often puts a <br> as the last child inside <b>/<strong> (e.g. a bold
+      // header line immediately followed by a line break, still inside the bold
+      // tag). Turndown's default rule wraps the whole converted content - break
+      // included - in ** ... **, so the closing ** ends up at the start of the
+      // next line, preceded by whitespace. Per CommonMark's flanking-delimiter
+      // rule, a closing ** preceded by whitespace can't close emphasis, so it
+      // prints as a literal **. This pulls any leading/trailing line break out
+      // of the wrapped content so the delimiters always sit flush against text.
+      function flankingSafeRule(tags, delimiterOption) {
+        return {
+          filter: tags,
+          replacement: function (content, node, options) {
+            if (!content.trim()) return "";
+            const delimiter = options[delimiterOption];
+            const leadingMatch = content.match(/^(?:\n[ \t]*)+/);
+            const trailingMatch = content.match(/(?:[ \t]*\n)+$/);
+            const leading = leadingMatch ? leadingMatch[0] : "";
+            const trailing = trailingMatch ? trailingMatch[0] : "";
+            const core = content.slice(leading.length, content.length - trailing.length);
+            if (!core.trim()) return content;
+            return leading + delimiter + core + delimiter + trailing;
+          }
+        };
+      }
+      turndownService.addRule("strongFlankingSafe", flankingSafeRule(["strong", "b"], "strongDelimiter"));
+      turndownService.addRule("emFlankingSafe", flankingSafeRule(["em", "i"], "emDelimiter"));
+
       turndownService.addRule("underline", {
         filter: ["u"],
         replacement: function (content) {
@@ -201,6 +230,18 @@
       a.click();
       document.body.removeChild(a);
       URL.revokeObjectURL(url);
+    }
+
+    function downloadRawHtml() {
+      setStatus("Reading raw HTML…");
+      Office.context.mailbox.item.body.getAsync(Office.CoercionType.Html, {}, function (result) {
+        if (result.status !== Office.AsyncResultStatus.Succeeded) {
+          setStatus("Failed to read email body: " + result.error.message, "error");
+          return;
+        }
+        downloadFile("raw-office-js-body.html", result.value);
+        setStatus("Downloaded raw HTML as returned by Office.js.", "ok");
+      });
     }
 
     function exportEmail() {
