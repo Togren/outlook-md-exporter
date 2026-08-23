@@ -170,6 +170,27 @@
       }
 
       processElement(doc.body);
+
+      // Word wraps every table cell's text in its own <p class="MsoNormal">,
+      // same as regular body text. Turndown converts that inner <p> to Markdown
+      // before the GFM table-cell rule ever sees it, injecting blank-line
+      // paragraph breaks into what needs to be flat single-line cell content -
+      // that breaks the pipe-table row assembly entirely (cells and pipes each
+      // end up on their own line). Unwrapping the <p> here (joining multiple
+      // paragraphs in one cell with <br> if present) keeps cell content inline
+      // so the table converts to a clean, valid GFM table.
+      doc.querySelectorAll("td, th").forEach(function (cell) {
+        const paragraphs = Array.from(cell.children).filter(el => el.tagName === "P");
+        if (paragraphs.length === 0) return;
+        const fragment = doc.createDocumentFragment();
+        paragraphs.forEach(function (p, idx) {
+          if (idx > 0) fragment.appendChild(doc.createElement("br"));
+          while (p.firstChild) fragment.appendChild(p.firstChild);
+        });
+        Array.from(cell.childNodes).forEach(node => cell.removeChild(node));
+        cell.appendChild(fragment);
+      });
+
       return doc.body.innerHTML;
     }
 
