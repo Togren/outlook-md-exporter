@@ -117,78 +117,103 @@
       return fm;
     }
 
-    // Outlook/Word wraps every visual line in its own <p class="x_MsoNormal">
-    // (zero margin, so consecutive lines sit tight). A real blank line is a
-    // genuinely empty <p> inserted between them, not extra CSS spacing.
-    // Turndown can't see that convention, so without this preprocessing every
-    // <p> boundary becomes a full Markdown paragraph break, inflating tight
-    // lines into blank-line-separated paragraphs. This merges tight runs of
-    // <p> into one paragraph (joined by <br>, which Turndown converts to a
-    // proper hard line break) and drops the empty spacer paragraphs, whose
-    // job of creating separation is preserved simply by the remaining
-    // paragraphs staying distinct.
+    // Outlook wraps each visual line of text in a block-level element - Word/
+    // desktop uses <p class="MsoNormal">, New Outlook's own compose editor
+    // uses plain <div dir="ltr" style="...">. Turndown treats any block-level
+    // element the same way (wrapped in a blank-line paragraph break by
+    // default), regardless of which tag Outlook happened to use, which causes
+    // two related problems: (1) tight visual lines that belong to the same
+    // paragraph get inflated into separate blank-line-separated paragraphs,
+    // and (2) inside a table cell, that same blank-line wrapping breaks GFM's
+    // pipe-table row assembly entirely.
+    //
+    // A "line" is defined here as a <p> or <div> with no further <p>/<div>
+    // nested inside it - i.e. an element that directly contains one visual
+    // line of content, not a wrapper around other lines. That single
+    // definition covers Word's <p>, New Outlook's <div>, and any similar
+    // variant Outlook introduces later without needing a new special case
+    // each time.
     function mergeTightParagraphs(html) {
       const doc = new DOMParser().parseFromString(html, "text/html");
+      const lineSelector = "p, div";
 
-      function isEmptyParagraph(el) {
-        if (!el || el.tagName !== "P") return false;
-        const text = el.textContent.replace(/\u00A0/g, "").trim();
-        return text.length === 0;
+      function isLineElement(el) {
+        return !!el && (el.tagName === "P" || el.tagName === "DIV") && !el.querySelector(lineSelector);
+      }
+      function isEmptyLine(el) {
+        return isLineElement(el) && el.textContent.replace(/\u00A0/g, "").trim().length === 0;
       }
 
+      // Top-level content: merge runs of consecutive non-empty sibling lines
+      // (joined by <br>, preserving them as one visual paragraph) and drop
+      // empty spacer lines (their job of creating separation is preserved
+      // simply by the remaining lines staying as distinct elements).
       function processElement(parent) {
-        // Recurse into non-P children first (paragraphs can live inside
-        // wrapping divs, table cells, etc.) - harmless no-op where it doesn't apply.
         Array.from(parent.children).forEach(child => {
-          if (child.tagName !== "P") processElement(child);
+          // Table internals are handled separately below - skip to avoid
+          // double-processing lines that live inside cells.
+          if (!isLineElement(child) && child.tagName !== "TABLE") processElement(child);
         });
 
         const children = Array.from(parent.children);
         let i = 0;
         while (i < children.length) {
           const el = children[i];
-          if (el.tagName === "P" && !isEmptyParagraph(el)) {
+          if (isLineElement(el) && !isEmptyLine(el)) {
             let j = i + 1;
             const run = [el];
-            while (j < children.length && children[j].tagName === "P" && !isEmptyParagraph(children[j])) {
+            while (j < children.length && isLineElement(children[j]) && !isEmptyLine(children[j])) {
               run.push(children[j]);
               j++;
             }
             for (let k = 1; k < run.length; k++) {
               run[0].appendChild(doc.createElement("br"));
-              while (run[k].firstChild) {
-                run[0].appendChild(run[k].firstChild);
-              }
+              while (run[k].firstChild) run[0].appendChild(run[k].firstChild);
               run[k].remove();
             }
             i = j;
           } else {
-            if (isEmptyParagraph(el)) el.remove();
+            if (isEmptyLine(el)) el.remove();
             i++;
           }
         }
       }
-
       processElement(doc.body);
 
-      // Word wraps every table cell's text in its own <p class="MsoNormal">,
-      // same as regular body text. Turndown converts that inner <p> to Markdown
-      // before the GFM table-cell rule ever sees it, injecting blank-line
-      // paragraph breaks into what needs to be flat single-line cell content -
-      // that breaks the pipe-table row assembly entirely (cells and pipes each
-      // end up on their own line). Unwrapping the <p> here (joining multiple
-      // paragraphs in one cell with <br> if present) keeps cell content inline
-      // so the table converts to a clean, valid GFM table.
-      doc.querySelectorAll("td, th").forEach(function (cell) {
-        const paragraphs = Array.from(cell.children).filter(el => el.tagName === "P");
-        if (paragraphs.length === 0) return;
-        const fragment = doc.createDocumentFragment();
-        paragraphs.forEach(function (p, idx) {
-          if (idx > 0) fragment.appendChild(doc.createElement("br"));
-          while (p.firstChild) fragment.appendChild(p.firstChild);
+      // Table cells: flatten all lines within a cell into one inline sequence
+      // joined by <br>, since a GFM table cell must be single-line content -
+      // there's no "separate paragraph" concept possible inside a cell the
+      // way there is at the top level.
+      //
+      // Only do this for tables with a genuine header row (matching the same
+      // check turndown-plugin-gfm itself uses to decide whether a table is
+      // convertible at all). Headerless tables fall back to being kept as raw
+      // HTML verbatim - flattening their cells here would quietly mutate that
+      // "kept" HTML before Turndown ever sees it, breaking the byte-for-byte
+      // losslessness that fallback is supposed to guarantee.
+      function tableHasHeaderRow(table) {
+        const firstRow = table.rows && table.rows[0];
+        if (!firstRow) return false;
+        if (firstRow.parentNode && firstRow.parentNode.nodeName === "THEAD") return true;
+        return Array.from(firstRow.cells).every(cell => cell.nodeName === "TH");
+      }
+
+      doc.querySelectorAll("table").forEach(function (table) {
+        if (!tableHasHeaderRow(table)) return;
+        table.querySelectorAll("td, th").forEach(function (cell) {
+          const lines = Array.from(cell.querySelectorAll(lineSelector)).filter(el => !el.querySelector(lineSelector));
+          if (lines.length === 0) return;
+          const fragment = doc.createDocumentFragment();
+          let appended = false;
+          lines.forEach(function (line) {
+            if (!line.textContent.trim()) return; // skip empty spacer lines within a cell
+            if (appended) fragment.appendChild(doc.createElement("br"));
+            while (line.firstChild) fragment.appendChild(line.firstChild);
+            appended = true;
+          });
+          cell.innerHTML = "";
+          cell.appendChild(fragment);
         });
-        Array.from(cell.childNodes).forEach(node => cell.removeChild(node));
-        cell.appendChild(fragment);
       });
 
       return doc.body.innerHTML;
